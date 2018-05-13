@@ -1,0 +1,283 @@
+---
+title: "newton"
+author: "YunranChen"
+date: "5/10/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("statmod")
+library("statmod")
+library(purrr)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tidyr)
+theme_set(theme_bw())
+#install.packages("truncdist")
+library(truncdist)
+```
+
+## For integration
+
+```{r}
+integrate(sin,0,pi)
+
+##small example for gauss.quad
+m=100
+a=0
+b=pi
+out=gauss.quad(m)
+(b-a)/2*sum(out$weights*sin(out$nodes*(b-a)/2+(a+b)/2))
+```
+
+## Data Preparation
+
+```{r}
+## try beta + normal mixture
+N=100 #size for sample
+n=200 #size for each sample
+sigma=0.1
+set.seed(123)
+bn_sampler=function(size,shape_1,shape_2){
+  xs_b_3_30=rbeta(n = size,shape1 = shape_1,shape2 = shape_2)
+xs_bn=map_dbl(xs_b_3_30,~rnorm(n = 1,mean = .x,sd = sigma))
+return(xs_bn)
+}
+Xs_bn=sapply(1:N,function(x){bn_sampler(n,3,30)})%>%t()
+
+```
+
+
+## Predictive Recursive
+
+```{r}
+m=1000 #numeric mesh 
+a=0
+b=1
+
+#guass.quad
+out=gauss.quad(m)
+theta=out$nodes*(b-a)/2+(a+b)/2 #change interval
+
+## Initial Guess: Uniform on [0,1]
+p=rep(1/m,m) #notice these points correspond to the out$nodes
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i){
+for (j in 1:n){
+  p_x=map_dbl(theta,~dnorm(Xs_bn[i,j],.x,sigma))
+  p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*p_x*p))
+}
+  return(p)
+}
+res=sapply(1:N,pr)
+colnames(res)=paste0("est",1:N)
+ggdf=res%>%as_tibble()%>%mutate(x=theta,true=dbeta(theta,3,30))%>%gather(data = .,key=estimation,value=p,-x)
+ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Beta(3,30)+Normal(,0.1)")
+
+```
+
+## get the p(x) -
+
+```{r}
+
+res_norm=t(t(res)/apply(res,2,sum))
+
+thetas=sapply(1:N, function(x){
+  sample(x = theta,size = m,replace = TRUE,prob = res_norm[,x])
+})
+xs=sapply(1:N,function(j){
+  map_dbl(1:m,~rnorm(n = 1,mean = thetas[.x,j],sd = sigma))
+})
+colnames(xs)=paste0("est",1:N)
+true_pis=rbeta(n = m,shape1 = 3,shape2 = 30)
+ggdf=xs%>%as_tibble()%>%mutate(true=map_dbl(1:m,~rnorm(n = 1,mean = true_pis[.x],sd = sigma)))%>%
+  gather(data = .,key=estimation,value=xs)
+
+
+ggplot(data=ggdf,mapping = aes(x=xs,group=estimation))+geom_density(colour = "grey",alpha=0.7)+geom_density(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=xs))#+scale_y_continuous(limits = c(0, 0.5))
+
+
+```
+
+## BN mixture
+
+## Data Preparation
+
+```{r}
+## try beta + normal mixture
+N=100 #size for sample
+n=200 #size for each sample
+sigma=0.1
+set.seed(123)
+bn_sampler_=function(size_){
+  components = sample(1:2,prob=c(1/3,2/3),size=size_,replace=TRUE)
+  shape1_=c(3,4)
+  shape2_=c(30,4)
+  xs_b=map_dbl(components,~rbeta(n = 1,shape1 = shape1_[.x],shape2=shape2_[.x] ))
+  xs_bn=map_dbl(xs_b,~rnorm(n = 1,mean = .x,sd = sigma))
+return(xs_bn)
+}
+Xs_bn=sapply(1:N,function(x){bn_sampler_(n)})%>%t()
+```
+
+
+## Predictive Recursive
+
+```{r}
+m=1000 #numeric mesh 
+a=0
+b=1
+
+#guass.quad
+out=gauss.quad(m)
+theta=out$nodes*(b-a)/2+(a+b)/2 #change interval
+
+## Initial Guess: Uniform on [0,1]
+p=rep(1/m,m) #notice these points correspond to the out$nodes
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i){
+  for (j in 1:n){
+    p_x=map_dbl(theta,~dnorm(Xs_bn[i,j],.x,sigma))
+    p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*p_x*p))
+  }
+  return(p)
+}
+res=sapply(1:N,pr)
+colnames(res)=paste0("est",1:N)
+ggdf=res%>%as_tibble()%>%mutate(x=theta,true=1/3*dbeta(theta,3,30)+2/3*dbeta(theta,4,4))%>%gather(data = .,key=estimation,value=p,-x)
+ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))
+
+```
+
+## get the p(x) -- using the Guass.quad
+
+```{r}
+res_norm=t(t(res)/apply(res,2,sum))
+thetas=sapply(1:N, function(x){
+  sample(x = theta,size = m,replace = TRUE,prob = res_norm[,x])
+})
+
+xs=sapply(1:N,function(j){
+  map_dbl(1:m,~rnorm(n = 1,mean = thetas[.x,j],sd = sigma))
+})
+colnames(xs)=paste0("est",1:N)
+  components = sample(1:2,prob=c(1/3,2/3),size=m,replace=TRUE)
+  shape1_=c(3,4)
+  shape2_=c(30,4)
+  true_pis=map_dbl(components,~rbeta(n = 1,shape1 = shape1_[.x],shape2=shape2_[.x] ))
+  
+ggdf=xs%>%as_tibble()%>%mutate(true=map_dbl(1:m,~rnorm(n = 1,mean = true_pis[.x],sd = sigma)))%>%
+  gather(data = .,key=estimation,value=xs)
+
+
+ggplot(data=ggdf,mapping = aes(x=xs,group=estimation))+geom_density(colour = "grey",alpha=0.7)+geom_density(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=xs))#+scale_y_continuous(limits = c(0, 0.5))
+
+
+```
+
+## get the p(x)
+
+```{r}
+
+```
+
+
+## GP mixture
+
+## Data Preparation
+
+```{r}
+
+## try poisson + gamma mixture
+N=100 #size for sample
+n=200 #size for each sample
+set.seed(123)
+gp_sampler_=function(size_){
+  #xs_g=rtrunc(n = size_,spec = "gamma",a=0,b=50,shape=2,rate=0.4)
+  xs_g=rgamma(n = size_,shape = 2,rate = 0.4)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn=sapply(1:N,function(x){gp_sampler_(n)})%>%t()
+#ggdf=Xs_bn%>%as_tibble()%>%gather(data = .,key=xs,value=p)
+#ggplot(data=ggdf,mapping = aes(x=p,group=xs))+geom_density()
+```
+
+
+## Predictive Recursive
+
+```{r}
+
+m=1000 #numeric mesh 
+a=0
+b=50
+
+#guass.quad
+out=gauss.quad(m)
+theta=out$nodes*(b-a)/2+(a+b)/2 #change interval
+
+PR=function(Xs_bn){
+
+## Initial Guess: Uniform on [0,1]
+p=rep(1/m,m) #notice these points correspond to the out$nodes
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i){
+  for (j in 1:n){
+    p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+    p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*p_x*p))
+  }
+  return(p)
+}
+res=sapply(1:N,pr)
+return(res)
+}
+res=PR(Xs_bn = Xs_bn)
+colnames(res)=paste0("est",1:N)
+#ggdf=res%>%as_tibble()%>%mutate(x=theta,true=dtrunc(x = theta,spec="gamma",a=0,b=50,shape=2,rate=0.4))%>%gather(data = .,key=estimation,value=p,-x)
+ggdf=res%>%as_tibble()%>%mutate(x=theta,true=dgamma(x = theta,shape = 2,rate = 0.4))%>%gather(data = .,key=estimation,value=p,-x)
+
+ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))#+scale_y_continuous(limits = c(0, 0.5))
+
+```
+
+## get the p(x) -- using the Guass.quad
+
+```{r}
+ggdf%>%filter(estimation=="true")%>%pull(p)%>%sum()
+res_norm=t(t(res)/apply(res,2,sum))
+#sample(x = theta,size = m,replace = TRUE,prob = res_norm[,1])
+lamdas=sapply(1:N, function(x){
+  sample(x = theta,size = m,replace = TRUE,prob = res_norm[,x])
+})
+xs=sapply(1:N,function(j){
+  map_dbl(1:m,~rpois(n = 1,lambda = lamdas[.x,j]))
+})
+colnames(xs)=paste0("est",1:N)
+ggdf=xs%>%as_tibble()%>%mutate(true=map_dbl(1:m,~rpois(n = 1,lambda = true_pis[.x])))%>%
+  gather(data = .,key=estimation,value=xs)
+true_pis=rgamma(n = m,shape = 2,rate = 0.4)
+
+ggplot(data=ggdf,mapping = aes(x=xs,group=estimation))+geom_density(colour = "grey",alpha=0.7)+geom_density(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=xs))#+scale_y_continuous(limits = c(0, 0.5))
+
+
+```
+
+```{r}
+#rnbinom(n=m, size=4, prob=1/(1+0.4))%>%density()%>%plot()
+```
+
+
