@@ -17,52 +17,85 @@ library(tidyr)
 theme_set(theme_bw())
 #install.packages("truncdist")
 library(truncdist)
+library(rbenchmark)
+
 ```
 
-## For integration
+## decide the range for x according to rule-of-thumb
 
 ```{r}
-integrate(sin,0,pi)
-
-##small example for gauss.quad
-m=100
-a=0
-b=pi
-out=gauss.quad(m)
-(b-a)/2*sum(out$weights*sin(out$nodes*(b-a)/2+(a+b)/2))
+x_range=function(xs_vec,ntheta,l,u){
+  n=length(xs_vec)
+  bw_cut=sd(xs_vec)*(4/3/n)^(1/5)*3
+  ub=max(xs_vec)+bw_cut
+  lb=min(xs_vec)-bw_cut
+  xxs=seq(max(lb,l),min(ub,u),length.out = ntheta)
+  return(xxs)
+}
 ```
+
+## GP mixture
+
+### truncated gamma
+
+```{r}
+rtgamma=function(size,shape_,rate_,a,b){
+  u=runif(n = size)
+  c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
+  x=qgamma(p = u*c_inv,shape=shape_,rate = rate_)
+  return(x)
+}
+dtgamma=function(x_,shape_,rate_,a,b){
+  c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
+  x=dgamma(x = x_,shape=shape_,rate = rate_)/c_inv
+  return(x)
+}
+```
+
+```{r}
+##test my function
+set.seed(123)
+rtgamma(100000,2,0.4,0,10)%>%density(.)%>%plot(.)
+set.seed(123)
+rtrunc(n = 100000,spec = "gamma",a=0,b=10,shape=2,rate=0.4)%>%density(.)%>%plot(.)
+
+dtrunc(x  = 1:10,spec = "gamma",a = 0,b = 10,shape=2,rate=0.4)
+dtgamma(x_ = 1:10,shape_ = 2,rate_=0.4,0,10)
+
+```
+
+# (1) truncated gamma -- possion
 
 ## Data Preparation
 
 ```{r}
-## try beta + normal mixture
+
+## try poisson + truncated-gamma mixture
 N=100 #size for sample
 n=200 #size for each sample
-sigma=0.1
 set.seed(123)
-bn_sampler=function(size,shape_1,shape_2){
-  xs_b_3_30=rbeta(n = size,shape1 = shape_1,shape2 = shape_2)
-xs_bn=map_dbl(xs_b_3_30,~rnorm(n = 1,mean = .x,sd = sigma))
-return(xs_bn)
+gp_sampler_=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 0.4,a = 0,b=10)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
 }
-Xs_bn=sapply(1:N,function(x){bn_sampler(n,3,30)})%>%t()
-
+Xs_bn=sapply(1:N,function(x){gp_sampler_(n)})%>%t()
 ```
 
 
 ## Predictive Recursive
 
 ```{r}
+PR_GP=function(Xs_bn,a,b,nGQ,ntheta){
 
-PR_BN=function(Xs_bn,a,b,nGQ,ntheta,m){
-
+N=nrow(Xs_bn)
 #guass.quad
 out=gauss.quad(nGQ)
 xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
 theta=seq(a,b,length.out = ntheta)
 
-## Initial Guess: Uniform on [0,1]
-p=rep(1,ntheta) #notice these points correspond to the xs
+## Initial Guess: Uniform on [0,50]
+p=rep(1/(b-a),ntheta) #notice these points correspond to the xs
 
 ## weight seq
 w=1/(1:n+1)
@@ -71,81 +104,136 @@ w=1/(1:n+1)
 pr=function(i,p_0){
   p=p_0
 for (j in 1:n){
-  p_x=map_dbl(theta,~dnorm(x = Xs_bn[i,j],mean = .x,sd = sigma))
-  p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dnorm(Xs_bn[i,j],.x,sigma))*p[ceiling(xs_gq/(1/ntheta))]))
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))
 }
   return(p)
 }
 res=sapply(1:N,function(i){return(pr(i,p))})
+
+##draw f(theta)
 colnames(res)=paste0("est",1:N)
-ggdf=res%>%as_tibble()%>%mutate(x=theta,true=dbeta(theta,3,30))%>%gather(data = .,key=estimation,value=p,-x)
-plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Beta(3,30)+Normal(,0.1)")
+ggdf=res%>%as_tibble()%>%
+  mutate(x=theta,true=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b))%>%
+  gather(data = .,key=estimation,value=p,-x)
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Poisson")
 
-## get the p(x)
 
-res_norm=t(t(res)/apply(res,2,sum))
+## get the p(x) -- Using Guassian Quadratic
 
-thetas=sapply(1:N, function(x){
-  sample(x = theta,size = m,replace = TRUE,prob = res_norm[,x])
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])})
 })
-xs=sapply(1:N,function(j){
-  map_dbl(1:m,~rnorm(n = 1,mean = thetas[.x,j],sd = sigma))
-})
-colnames(xs)=paste0("est",1:N)
-true_pis=rbeta(n = m,shape1 = 3,shape2 = 30)
-ggdf=xs%>%as_tibble()%>%mutate(true=map_dbl(1:m,~rnorm(n = 1,mean = true_pis[.x],sd = sigma)))%>%
-  gather(data = .,key=estimation,value=xs)
 
+true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+true=map_dbl(.x = true_xs,
+             .f =function(xxs_i){ (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])})
 
-plotme_p=ggplot(data=ggdf,mapping = aes(x=xs,group=estimation))+geom_density(colour = "grey",alpha=0.7)+geom_density(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=xs))#+scale_y_continuous(limits = c(0, 0.5))
+ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Poisson")
 
 print(plotme_f)
 print(plotme_p)
-
 }
 ```
 
 ```{r}
-set.seed(1)
-PR_BN(Xs_bn=Xs_bn,a=0,b=1,nGQ=20,ntheta=100,m=1000)
-
+tic=proc.time()
+PR_GP(Xs_bn=Xs_bn,a=0,b=10,nGQ=20,ntheta=100)
+toc=proc.time()
+toc-tic
+#robust. no need to set.seed
 ```
 
-## BN mixture
-
-## Data Preparation
+## Permutation Version PPR
 
 ```{r}
-## try beta + normal mixture
-N=100 #size for sample
-n=200 #size for each sample
-sigma=0.1
-set.seed(123)
-bn_sampler_=function(size_){
-  components = sample(1:2,prob=c(1/3,2/3),size=size_,replace=TRUE)
-  shape1_=c(3,4)
-  shape2_=c(30,4)
-  xs_b=map_dbl(components,~rbeta(n = 1,shape1 = shape1_[.x],shape2=shape2_[.x] ))
-  xs_bn=map_dbl(xs_b,~rnorm(n = 1,mean = .x,sd = sigma))
-return(xs_bn)
+PPR_GP=function(Xs_bn,a,b,nGQ,ntheta){
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta) #notice these points correspond to the xs
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+  pp=sapply(1:nP,function(ix){
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn_p[j,ix],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))
+    }
+    return(p)
+  })%>%apply(., 1,mean)
+  return(pp)
 }
-Xs_bn=sapply(1:N,function(x){bn_sampler_(n)})%>%t()
+
+res=sapply(1:N,function(i){return(ppr(i,p,Xs_bn))})
+
+##draw f(theta)
+colnames(res)=paste0("est",1:N)
+ggdf=res%>%as_tibble()%>%
+  mutate(x=theta,true=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b))%>%
+  gather(data = .,key=estimation,value=p,-x)
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Poisson")
+
+
+## get the p(x) -- Using Guassian Quadratic
+
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])})
+})
+
+true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+true=map_dbl(.x = true_xs,
+             .f =function(xxs_i){ (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])})
+
+ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Poisson")
+
+print(plotme_f)
+print(plotme_p)
+}
+```
+
+```{r}
+tic=proc.time()
+PPR_GP(Xs_bn=Xs_bn,a=0,b=10,nGQ=20,ntheta=100)
+toc=proc.time()
+toc-tic
 ```
 
 
-## Predictive Recursive
+## Comparision between GQ and sampling
 
 ```{r}
-
-PR_BN_mix=function(Xs_bn,a,b,nGQ,ntheta,m){
-  
+PR_BN_mix=function(Xs_bn,a,b,nGQ,ntheta){
+  N=nrow(Xs_bn)
 #guass.quad
 out=gauss.quad(nGQ)
 xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
 theta=seq(a,b,length.out = ntheta)
 
 ## Initial Guess: Uniform on [0,1]
-p=rep(1,ntheta) #notice these points correspond to the xs
+p=rep(1/(b-a),ntheta) #notice these points correspond to the xs
 
 ## weight seq
 w=1/(1:n+1)
@@ -169,6 +257,9 @@ plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(col
 
 ## get the p(x) 
 
+###Using sampling 
+sampling=function(){
+  m=1500
 res_norm=t(t(res)/apply(res,2,sum))
 thetas=sapply(1:N, function(x){
   sample(x = theta,size = m,replace = TRUE,prob = res_norm[,x])
@@ -185,53 +276,79 @@ colnames(xs)=paste0("est",1:N)
   
 ggdf=xs%>%as_tibble()%>%mutate(true=map_dbl(1:m,~rnorm(n = 1,mean = true_pis[.x],sd = sigma)))%>%
   gather(data = .,key=estimation,value=xs)
-
-
 plotme_p=ggplot(data=ggdf,mapping = aes(x=xs,group=estimation))+geom_density(colour = "grey",alpha=0.7)+geom_density(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=xs))
+#print(plotme_p)
+}
+###Using Guassian Quadratic
+gq=function(){
 
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta)})
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dnorm(xs_j,.x,sigma))*res[,j][ceiling(xs_gq/(1/ntheta))])})
+})
+
+colnames(xs)=paste0("est",1:N)
+
+true=map_dbl(.x = x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta),.f =function(xxs_i){ (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dnorm(xxs_i,.x,sigma))*(1/3*dbeta(theta,3,30)+2/3*dbeta(theta,4,4))[ceiling(xs_gq/(1/ntheta))])})
+
+ggdf_p=xs%>%as_tibble()%>%mutate(x=xxs,true=true)%>%gather(data = .,key=estimation,value=p,-x)
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("1/3Beta(3,30)+2/3Beta(4,4)+Normal(,0.1)")
+}
 print(plotme_f)
 print(plotme_p)
 }
+plotme_p2=plotme_p
+print(plotme_p)
+print(plotme_p2)
+print(plotme_p1)
+benchmark(
+  gq(),
+  sampling(),
+  replications = 10
+)
 ```
 
-```{r}
-set.seed(1)
-PR_BN_mix(Xs_bn=Xs_bn,a=0,b=1,nGQ=20,ntheta=100,m=1000)
-```
+# (2) truncated gamma + point mass mixture -- possion
 
-
-## GP mixture
+$f(\theta) = \frac{1}{2}\delta_{10}+\frac{1}{2}Gamma_{[0,10]}(2,0.4)$
 
 ## Data Preparation
 
 ```{r}
 
-## try poisson + gamma mixture
+## try truncated gamma + point mass mixture -- possion
 N=100 #size for sample
 n=200 #size for each sample
 set.seed(123)
-gp_sampler_=function(size_){
-  #xs_g=rtrunc(n = size_,spec = "gamma",a=0,b=50,shape=2,rate=0.4)
-  xs_g=rgamma(n = size_,shape = 2,rate = 0.4)
+
+gpp_sampler_=function(size_){
+  xs_g=vector(length = size_)
+  components = sample(1:2,prob=c(1/2,1/2),size=size_,replace=TRUE)
+  xs_g[components==1]=10
+  xs_g[components==2]=rtgamma(size =  sum(components==2),shape_ = 2,rate_ = 0.4,a = 0,b=10)
   xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
 return(xs_gp)
 }
-Xs_bn=sapply(1:N,function(x){gp_sampler_(n)})%>%t()
+Xs_bn=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
+#Each row is a sample
 ```
-
 
 ## Predictive Recursive
 
 ```{r}
-PR_GP=function(Xs_bn,a,b,nGQ,ntheta,m){
+PR_GPP=function(Xs_bn,a,b,theta0,nGQ,ntheta){
 
+N=nrow(Xs_bn)
 #guass.quad
 out=gauss.quad(nGQ)
 xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
 theta=seq(a,b,length.out = ntheta)
 
-## Initial Guess: Uniform on [0,50]
-p=rep(1/(b-a),ntheta) #notice these points correspond to the xs
+## Initial Guess: Uniform on [0,10]
+
+p=rep(1/(b-a)/2,ntheta)
+ind0=ceiling(theta0/((b-a)/ntheta))
+p[ind0]=1/2
 
 ## weight seq
 w=1/(1:n+1)
@@ -241,42 +358,138 @@ pr=function(i,p_0){
   p=p_0
 for (j in 1:n){
   p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
-  p=(1-w[j])*p+w[j]*p_x*p/((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))*(1-p[ind0])+p[ind0]*dpois(x = Xs_bn[i,j],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
 }
   return(p)
 }
 res=sapply(1:N,function(i){return(pr(i,p))})
+
+##draw f(theta)
 colnames(res)=paste0("est",1:N)
-ggdf=res%>%as_tibble()%>%mutate(x=theta,true=dgamma(x = theta,shape = 2,rate = 0.4))%>%gather(data = .,key=estimation,value=p,-x)
-#ggdf=res%>%as_tibble()%>%mutate(x=theta,true=dtrunc(x = theta,spec="gamma",a=0,b=50,shape=2,rate=0.4))%>%gather(data = .,key=estimation,value=p,-x)
-plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,4)+Poisson")
+true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
+true_f[ind0]=0.5
+ggdf=res%>%as_tibble()%>%
+  mutate(x=theta,true=true_f)%>%
+  gather(data = .,key=estimation,value=p,-x)
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
- ## get the p(x) 
 
-res_norm=t(t(res)/apply(res,2,sum))
-lamdas=sapply(1:N, function(x){
-  sample(x = theta,size = m,replace = TRUE,prob = res_norm[,x])
+## get the p(x) -- Using Guassian Quadratic
+
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-res[,j][ind0])+res[,j][ind0]*dpois(x = round(xs_j),lambda = theta0)
+  })
+  
 })
 
-xs=sapply(1:N,function(j){
-  map_dbl(1:m,~rpois(n = 1,lambda = lamdas[.x,j]))
-})
-colnames(xs)=paste0("est",1:N)
-true_pis=rgamma(n = m,shape = 2,rate = 0.4)
+true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+true=map_dbl(.x = true_xs,
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.5*dpois(x = round(xxs_i),lambda = theta0)
+             })
 
-ggdf=xs%>%as_tibble()%>%mutate(true=map_dbl(1:m,~rpois(n = 1,lambda = true_pis[.x])))%>%
-  gather(data = .,key=estimation,value=xs)
+ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
-plotme_p=ggplot(data=ggdf,mapping = aes(x=xs,group=estimation))+geom_density(colour = "grey",alpha=0.7)+geom_density(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=xs))
 print(plotme_f)
 print(plotme_p)
 }
 ```
 
 ```{r}
-set.seed(1)
-PR_GP(Xs_bn=Xs_bn,a=0,b=50,nGQ=20,ntheta=100,m=1000)
+tic=proc.time()
+PR_GPP(Xs_bn=Xs_bn,a=0,b=10,theta0 = 10,nGQ=20,ntheta=100)
+toc=proc.time()
+toc-tic
+
 ```
 
 
+## Permutation Version PPR
 
+```{r}
+PPR_GPP=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a)/2,ntheta)
+ind0=ceiling(theta0/((b-a)/ntheta))
+p[ind0]=1/2
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+  pp=sapply(1:nP,function(ix){
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn_p[j,ix],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))])*(1-p[ind0]))+p[ind0]*dpois(x = Xs_bn_p[j,ix],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
+
+    }
+    return(p)
+  })%>%apply(., 1,mean)
+  return(pp)
+}
+
+res=sapply(1:N,function(i){return(ppr(i,p,Xs_bn))})
+
+##draw f(theta)
+colnames(res)=paste0("est",1:N)
+true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
+true_f[ind0]=0.5
+ggdf=res%>%as_tibble()%>%
+  mutate(x=theta,true=true_f)%>%
+  gather(data = .,key=estimation,value=p,-x)
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+
+
+## get the p(x) -- Using Guassian Quadratic
+
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-res[,j][ind0])+res[,j][ind0]*dpois(x = round(xs_j),lambda = theta0)
+  })
+  
+})
+
+true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+true=map_dbl(.x = true_xs,
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.5*dpois(x = round(xxs_i),lambda = theta0)
+             })
+
+ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+
+print(plotme_f)
+print(plotme_p)
+
+}
+```
+
+```{r}
+tic=proc.time()
+PPR_GPP(Xs_bn=Xs_bn,a=0,b=10,theta0 = 10,nGQ=20,ntheta=100)
+toc=proc.time()
+toc-tic
+
+```
