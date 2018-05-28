@@ -369,7 +369,11 @@ res=sapply(1:N,function(i){return(pr(i,p))})
 colnames(res)=paste0("est",1:N)
 true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
 true_f[ind0]=0.5
-ggdf=res%>%as_tibble()%>%
+res_f=res
+for (col in 1:ncol(res)){
+  res_f[-ind0,col]=res[ind0,col]*res[-ind0,col]
+}
+ggdf=res_f%>%as_tibble()%>%
   mutate(x=theta,true=true_f)%>%
   gather(data = .,key=estimation,value=p,-x)
 plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
@@ -455,7 +459,11 @@ res=sapply(1:N,function(i){return(ppr(i,p,Xs_bn))})
 colnames(res)=paste0("est",1:N)
 true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
 true_f[ind0]=0.5
-ggdf=res%>%as_tibble()%>%
+res_f=res
+for (col in 1:ncol(res)){
+  res_f[-ind0,col]=res[ind0,col]*res[-ind0,col]
+}
+ggdf=res_f%>%as_tibble()%>%
   mutate(x=theta,true=true_f)%>%
   gather(data = .,key=estimation,value=p,-x)
 plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
