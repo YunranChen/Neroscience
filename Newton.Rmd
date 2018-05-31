@@ -18,7 +18,7 @@ theme_set(theme_bw())
 #install.packages("truncdist")
 library(truncdist)
 library(rbenchmark)
-
+rm(list=ls())
 ```
 
 ## decide the range for x according to rule-of-thumb
@@ -336,7 +336,7 @@ Xs_bn=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
 ## Predictive Recursive
 
 ```{r}
-PR_GPP=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+PR_GPP=function(Xs_bn,a,b,c,theta0,nGQ,ntheta){
 
 N=nrow(Xs_bn)
 #guass.quad
@@ -346,7 +346,8 @@ theta=seq(a,b,length.out = ntheta)
 
 ## Initial Guess: Uniform on [0,10]
 
-p=rep(1/(b-a)/2,ntheta)
+#p=rep(1/(b-a)/2,ntheta) #uniform
+p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
 ind0=ceiling(theta0/((b-a)/ntheta))
 p[ind0]=1/2
 
@@ -371,12 +372,12 @@ true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
 true_f[ind0]=0.5
 res_f=res
 for (col in 1:ncol(res)){
-  res_f[-ind0,col]=res[ind0,col]*res[-ind0,col]
+  res_f[-ind0,col]=(1-res[ind0,col])*res[-ind0,col]
 }
 ggdf=res_f%>%as_tibble()%>%
   mutate(x=theta,true=true_f)%>%
   gather(data = .,key=estimation,value=p,-x)
-plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",c))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
 
 ## get the p(x) -- Using Guassian Quadratic
@@ -396,26 +397,39 @@ true=map_dbl(.x = true_xs,
              })
 
 ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
-plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",c))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
 print(plotme_f)
 print(plotme_p)
+return(res[ind0,])
 }
 ```
 
 ```{r}
 tic=proc.time()
-PR_GPP(Xs_bn=Xs_bn,a=0,b=10,theta0 = 10,nGQ=20,ntheta=100)
+for (c in c(1.1,1.5,2,4,8)){
+  print(paste0("beta(",c,")"))
+  pi_=PR_GPP(Xs_bn=Xs_bn,a=0,b=10,c=c,theta0 = 10,nGQ=20,ntheta=100)
+  print(pi_%>%summary(.))
+  print((pi_<0.5)%>%mean)
+}
+
 toc=proc.time()
 toc-tic
 
+pi_=PR_GPP(Xs_bn=Xs_bn,a=0,b=10,c=4,theta0 = 10,nGQ=20,ntheta=100)
+print(pi_%>%summary(.))
+print((pi_<0.5)%>%mean)
+hist(pi_)
 ```
+
+
 
 
 ## Permutation Version PPR
 
 ```{r}
-PPR_GPP=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+PPR_GPP=function(Xs_bn,a,b,c,theta0,nGQ,ntheta){
 
 #permutation
 N=nrow(Xs_bn)
@@ -429,7 +443,8 @@ xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
 theta=seq(a,b,length.out = ntheta)
 
 ## Initial Guess: Uniform on [0,10]
-p=rep(1/(b-a)/2,ntheta)
+#p=rep(1/(b-a)/2,ntheta)
+p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
 ind0=ceiling(theta0/((b-a)/ntheta))
 p[ind0]=1/2
 ## weight seq
@@ -461,12 +476,12 @@ true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
 true_f[ind0]=0.5
 res_f=res
 for (col in 1:ncol(res)){
-  res_f[-ind0,col]=res[ind0,col]*res[-ind0,col]
+  res_f[-ind0,col]=(1-res[ind0,col])*res[-ind0,col]
 }
 ggdf=res_f%>%as_tibble()%>%
   mutate(x=theta,true=true_f)%>%
   gather(data = .,key=estimation,value=p,-x)
-plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",c))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
 
 ## get the p(x) -- Using Guassian Quadratic
@@ -486,18 +501,234 @@ true=map_dbl(.x = true_xs,
              })
 
 ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
-plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",c))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
 print(plotme_f)
 print(plotme_p)
-
+return(res[ind0,])
 }
 ```
 
 ```{r}
 tic=proc.time()
-PPR_GPP(Xs_bn=Xs_bn,a=0,b=10,theta0 = 10,nGQ=20,ntheta=100)
+pi__=PPR_GPP(Xs_bn=Xs_bn,a=0,b=10,c=4,theta0 = 10,nGQ=20,ntheta=100)
+toc=proc.time()
+toc-tic
+print(pi__%>%summary(.))
+print((pi__<0.5)%>%mean)
+hist(pi__)
+```
+
+# (3) truncated gamma + 2 point mass mixture -- possion
+
+$f(\theta) = \frac{1}{2}\delta_{10}+\frac{1}{2}Gamma_{[0,10]}(2,0.4)$
+
+## Data Preparation
+
+```{r}
+
+## try truncated gamma + point mass mixture -- possion
+N=100 #size for sample
+n=200 #size for each sample
+set.seed(123)
+
+gpp_sampler_=function(size_){
+  xs_g=vector(length = size_)
+  components = sample(1:3,prob=c(0.25,0.5,0.25),size=size_,replace=TRUE)
+  xs_g[components==1]=0
+  xs_g[components==3]=10
+  xs_g[components==2]=rtgamma(size =  sum(components==2),shape_ = 2,rate_ = 0.4,a = 0,b=10)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
+#Each row is a sample
+```
+
+## Predictive Recursive
+
+```{r}
+PR_GP2P=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+
+N=nrow(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+
+p=rep(1/(b-a)/2,ntheta) #uniform
+#p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
+inds=ceiling(theta0/((b-a)/ntheta))
+p[inds]=c(0.25,0.25)
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))*(1-sum(p[inds]))+p[inds[1]]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[inds[2]]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+}
+  return(p)
+}
+res=sapply(1:N,function(i){return(pr(i,p))})
+
+##draw f(theta)
+colnames(res)=paste0("est",1:N)
+true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
+true_f[inds]=c(0.25,0.25)
+res_f=res
+for (col in 1:ncol(res)){
+  res_f[-inds,col]=(1-sum(res[inds,col]))*res[-inds,col]
+}
+ggdf=res_f%>%as_tibble()%>%
+  mutate(x=theta,true=true_f)%>%
+  gather(data = .,key=estimation,value=p,-x)
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_10,0+Poisson")
+
+
+## get the p(x) -- Using Guassian Quadratic
+
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-sum(res[,j][inds]))+res[,j][inds[1]]*dpois(x = round(xs_j),lambda = theta0[1])+res[,j][inds[2]]*dpois(x = round(xs_j),lambda = theta0[2])
+  })
+  
+})
+
+true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+true=map_dbl(.x = true_xs,
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.25*dpois(x = round(xxs_i),lambda = theta0[1])+0.25*dpois(x = round(xxs_i),lambda = theta0[2])
+             })
+
+ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_0,10+Poisson")#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+
+print(plotme_f)
+print(plotme_p)
+return(res[inds,])
+}
+```
+
+```{r}
+tic=proc.time()
+pi_2p=PR_GP2P(Xs_bn=Xs_bn,a=0,b=10,theta0 = c(0.00001,10),nGQ=20,ntheta=100)
+toc=proc.time()
+toc-tic
+
+
+apply(pi_2p,1,summary)
+(pi_2p[1,]<0.25)%>%mean(.)
+(pi_2p[2,]<0.25)%>%mean(.)
+hist(pi_2p[1,])
+hist(pi_2p[2,])
+```
+
+
+## Permutation Version PPR
+
+```{r}
+PPR_GPP=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a)/2,ntheta)
+#p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
+inds=ceiling(theta0/((b-a)/ntheta))
+p[inds]=c(0.25,0.25)
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+  pp=sapply(1:nP,function(ix){
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn_p[j,ix],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))])*(1-sum(p[inds])))+p[inds[1]]*dpois(x = Xs_bn_p[j,ix],lambda = theta0[1])+p[inds[2]]*dpois(x = Xs_bn_p[j,ix],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+
+    }
+    return(p)
+  })%>%apply(., 1,mean)
+  return(pp)
+}
+
+res=sapply(1:N,function(i){return(ppr(i,p,Xs_bn))})
+
+##draw f(theta)
+colnames(res)=paste0("est",1:N)
+true_f=dtgamma(x_ = theta,shape_ = 2,rate_=0.4,a = a,b=b)*0.5
+true_f[inds]=c(0.25,0.25)
+res_f=res
+for (col in 1:ncol(res)){
+  res_f[-inds,col]=(1-sum(res[inds,col]))*res[-inds,col]
+}
+ggdf=res_f%>%as_tibble()%>%
+  mutate(x=theta,true=true_f)%>%
+  gather(data = .,key=estimation,value=p,-x)
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_0,10+Poisson")
+
+
+## get the p(x) -- Using Guassian Quadratic
+
+Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+
+xs=sapply(1:ntheta,function(j){
+  map_dbl(.x = Xss[,j],.f = function(xs_j){
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-sum(res[,j][inds]))+res[,j][inds[1]]*dpois(x = round(xs_j),lambda = theta0[1])+res[,j][inds[2]]*dpois(x = round(xs_j),lambda = theta0[2])
+  })
+  
+})
+
+true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+true=map_dbl(.x = true_xs,
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.25*dpois(x = round(xxs_i),lambda = theta0[1])+0.25*dpois(x = round(xxs_i),lambda = theta0[2])
+             })
+
+ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle("Gamma(2,0.4)[0,10]+Delta_0,10+Poisson")
+
+print(plotme_f)
+print(plotme_p)
+return(res[inds,])
+}
+```
+
+```{r}
+tic=proc.time()
+pi__2p=PPR_GPP(Xs_bn=Xs_bn,a=0,b=10,theta0 = c(0.000001,10),nGQ=20,ntheta=100)
 toc=proc.time()
 toc-tic
 
 ```
+
+
+```{r}
+apply(pi__2p,1,summary)
+(pi__2p[1,]<0.25)%>%mean(.)
+(pi__2p[2,]<0.25)%>%mean(.)
+hist(pi__2p[1,])
+hist(pi__2p[2,])
+```
+
