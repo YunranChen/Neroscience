@@ -42,7 +42,7 @@ x_range=function(xs_vec,ntheta,l,u){
 rtgamma=function(size,shape_,rate_,a,b){
   u=runif(n = size)
   c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
-  x=qgamma(p = u*c_inv,shape=shape_,rate = rate_)
+  x=qgamma(p = u*c_inv+pgamma(q=a,shape=shape_,rate=rate_),shape=shape_,rate = rate_)
   return(x)
 }
 dtgamma=function(x_,shape_,rate_,a,b){
@@ -336,9 +336,10 @@ Xs_bn=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
 ## Predictive Recursive
 
 ```{r}
-PR_GPP=function(Xs_bn,a,b,c,theta0,nGQ,ntheta){
+PR_GPP=function(Xs_bn,a,b,theta0,nGQ,ntheta){
 
 N=nrow(Xs_bn)
+n=ncol(Xs_bn)
 #guass.quad
 out=gauss.quad(nGQ)
 xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
@@ -346,9 +347,9 @@ theta=seq(a,b,length.out = ntheta)
 
 ## Initial Guess: Uniform on [0,10]
 
-#p=rep(1/(b-a)/2,ntheta) #uniform
-p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
-ind0=ceiling(theta0/((b-a)/ntheta))
+p=rep(1/(b-a)/2,ntheta) #uniform
+#p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
+ind0=ceiling((theta0-a)/((b-a)/ntheta))
 p[ind0]=1/2
 
 ## weight seq
@@ -359,7 +360,7 @@ pr=function(i,p_0){
   p=p_0
 for (j in 1:n){
   p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
-  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))*(1-p[ind0])+p[ind0]*dpois(x = Xs_bn[i,j],lambda = theta0)
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))*(1-p[ind0])+p[ind0]*dpois(x = Xs_bn[i,j],lambda = theta0)
   p=(1-w[j])*p+w[j]*p_x*p/int
 }
   return(p)
@@ -377,31 +378,31 @@ for (col in 1:ncol(res)){
 ggdf=res_f%>%as_tibble()%>%
   mutate(x=theta,true=true_f)%>%
   gather(data = .,key=estimation,value=p,-x)
-plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",c))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",ntheta))##+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")#
 
 
 ## get the p(x) -- Using Guassian Quadratic
 
 Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
 
-xs=sapply(1:ntheta,function(j){
+xs=sapply(1:N,function(j){
   map_dbl(.x = Xss[,j],.f = function(xs_j){
-    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-res[,j][ind0])+res[,j][ind0]*dpois(x = round(xs_j),lambda = theta0)
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling((xs_gq-a)/((b-a)/ntheta))])*(1-res[,j][ind0])+res[,j][ind0]*dpois(x = round(xs_j),lambda = theta0)
   })
   
 })
 
 true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
 true=map_dbl(.x = true_xs,
-             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.5*dpois(x = round(xxs_i),lambda = theta0)
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling((xs_gq-a)/((b-a)/ntheta))])*0.5+0.5*dpois(x = round(xxs_i),lambda = theta0)
              })
 
 ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
-plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",c))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
+plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = "grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = aes(x=x,y=p))+ggtitle(paste0("Gamma(2,0.4)[0,10]+Delta_10+Poisson_",ntheta))#+ggtitle("Gamma(2,0.4)[0,10]+Delta_10+Poisson")
 
-print(plotme_f)
-print(plotme_p)
-return(res[ind0,])
+#print(plotme_f)
+#print(plotme_p)
+return(list(result=res[ind0,],f=plotme_f,p=plotme_p))
 }
 ```
 
@@ -412,6 +413,7 @@ for (c in c(1.1,1.5,2,4,8)){
   pi_=PR_GPP(Xs_bn=Xs_bn,a=0,b=10,c=c,theta0 = 10,nGQ=20,ntheta=100)
   print(pi_%>%summary(.))
   print((pi_<0.5)%>%mean)
+  hist(pi_)
 }
 
 toc=proc.time()
@@ -421,6 +423,17 @@ pi_=PR_GPP(Xs_bn=Xs_bn,a=0,b=10,c=4,theta0 = 10,nGQ=20,ntheta=100)
 print(pi_%>%summary(.))
 print((pi_<0.5)%>%mean)
 hist(pi_)
+
+#
+for (grids in c(100,500,1000,1500,2000)){
+  print(paste0("ntheta(",grids,")"))
+  pi_=PR_GPP(Xs_bn=Xs_bn,a=0,b=10,theta0 = 10,nGQ=20,ntheta=grids)
+  #print(pi_$p)
+  #print(pi_$f)
+  print(pi_$result%>%summary(.))
+  print((pi_$result<0.5)%>%mean)
+  hist(pi_$result)
+}
 ```
 
 
@@ -445,7 +458,7 @@ theta=seq(a,b,length.out = ntheta)
 ## Initial Guess: Uniform on [0,10]
 #p=rep(1/(b-a)/2,ntheta)
 p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
-ind0=ceiling(theta0/((b-a)/ntheta))
+ind0=ceiling((theta0-a)/((b-a)/ntheta))
 p[ind0]=1/2
 ## weight seq
 w=1/(1:n+1)
@@ -459,7 +472,7 @@ ppr=function(i,p_0,Xs_bn){
   pp=sapply(1:nP,function(ix){
     for (j in 1:n){
       p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
-      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn_p[j,ix],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))])*(1-p[ind0]))+p[ind0]*dpois(x = Xs_bn_p[j,ix],lambda = theta0)
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn_p[j,ix],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))])*(1-p[ind0]))+p[ind0]*dpois(x = Xs_bn_p[j,ix],lambda = theta0)
   p=(1-w[j])*p+w[j]*p_x*p/int
 
     }
@@ -490,14 +503,14 @@ Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf
 
 xs=sapply(1:ntheta,function(j){
   map_dbl(.x = Xss[,j],.f = function(xs_j){
-    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-res[,j][ind0])+res[,j][ind0]*dpois(x = round(xs_j),lambda = theta0)
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling((xs_gq-a)/((b-a)/ntheta))])*(1-res[,j][ind0])+res[,j][ind0]*dpois(x = round(xs_j),lambda = theta0)
   })
   
 })
 
 true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
 true=map_dbl(.x = true_xs,
-             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.5*dpois(x = round(xxs_i),lambda = theta0)
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling((xs_gq-a)/((b-a)/ntheta))])*0.5+0.5*dpois(x = round(xxs_i),lambda = theta0)
              })
 
 ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
@@ -560,7 +573,7 @@ theta=seq(a,b,length.out = ntheta)
 
 p=rep(1/(b-a)/2,ntheta) #uniform
 #p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
-inds=ceiling(theta0/((b-a)/ntheta))
+inds=ceiling((theta0-a)/((b-a)/ntheta))
 p[inds]=c(0.25,0.25)
 
 ## weight seq
@@ -571,7 +584,7 @@ pr=function(i,p_0){
   p=p_0
 for (j in 1:n){
   p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
-  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling(xs_gq/((b-a)/ntheta))]))*(1-sum(p[inds]))+p[inds[1]]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[inds[2]]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))*(1-sum(p[inds]))+p[inds[1]]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[inds[2]]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
   p=(1-w[j])*p+w[j]*p_x*p/int
 }
   return(p)
@@ -598,14 +611,14 @@ Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf
 
 xs=sapply(1:ntheta,function(j){
   map_dbl(.x = Xss[,j],.f = function(xs_j){
-    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])*(1-sum(res[,j][inds]))+res[,j][inds[1]]*dpois(x = round(xs_j),lambda = theta0[1])+res[,j][inds[2]]*dpois(x = round(xs_j),lambda = theta0[2])
+    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = .x))*res[,j][ceiling((xs_gq-a)/((b-a)/ntheta))])*(1-sum(res[,j][inds]))+res[,j][inds[1]]*dpois(x = round(xs_j),lambda = theta0[1])+res[,j][inds[2]]*dpois(x = round(xs_j),lambda = theta0[2])
   })
   
 })
 
 true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
 true=map_dbl(.x = true_xs,
-             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling(xs_gq/((b-a)/ntheta))])*0.5+0.25*dpois(x = round(xxs_i),lambda = theta0[1])+0.25*dpois(x = round(xxs_i),lambda = theta0[2])
+             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = 2,rate_ = 0.4,a = a,b = b))[ceiling((xs_gq-a)/((b-a)/ntheta))])*0.5+0.25*dpois(x = round(xxs_i),lambda = theta0[1])+0.25*dpois(x = round(xxs_i),lambda = theta0[2])
              })
 
 ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
@@ -651,7 +664,8 @@ theta=seq(a,b,length.out = ntheta)
 ## Initial Guess: Uniform on [0,10]
 p=rep(1/(b-a)/2,ntheta)
 #p=dbeta(x = seq(0,1,length.out = ntheta),shape1 = c,shape2 = c)/(b-a)/2
-inds=ceiling(theta0/((b-a)/ntheta))
+inds=ceiling((theta0-a)/((b-a)/ntheta))
+
 p[inds]=c(0.25,0.25)
 ## weight seq
 w=1/(1:n+1)

@@ -1,0 +1,828 @@
+---
+title: "newton"
+author: "YunranChen"
+date: "5/10/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("statmod")
+library("statmod")
+library(purrr)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tidyr)
+theme_set(theme_bw())
+#install.packages("truncdist")
+library(truncdist)
+library(rbenchmark)
+rm(list=ls())
+```
+
+## decide the range for x according to rule-of-thumb
+
+```{r}
+x_range=function(xs_vec,ntheta,l,u){
+  n=length(xs_vec)
+  bw_cut=sd(xs_vec)*(4/3/n)^(1/5)*3
+  ub=max(xs_vec)+bw_cut
+  lb=min(xs_vec)-bw_cut
+  xxs=seq(max(lb,l),min(ub,u),length.out = ntheta)
+  return(xxs)
+}
+```
+
+```{r}
+rtgamma=function(size,shape_,rate_,a,b){
+  u=runif(n = size)
+  c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
+  x=qgamma(p = u*c_inv+pgamma(q=a,shape=shape_,rate=rate_),shape=shape_,rate = rate_)
+  return(x)
+}
+dtgamma=function(x_,shape_,rate_,a,b){
+  c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
+  x=dgamma(x = x_,shape=shape_,rate = rate_)/c_inv
+  return(x)
+}
+```
+
+# truncated gamma + point mass mixture -- possion
+
+$f(\theta) = \frac{1}{2}\delta_{10}+\frac{1}{2}Gamma_{[0,10]}(2,0.4)$
+
+## Data Preparation
+
+```{r}
+
+## try truncated gamma + point mass mixture -- possion
+N=100 #size for sample
+n=200 #size for each sample
+set.seed(123)
+
+gpp_sampler_=function(size_,pi){
+  xs_g = sample(c(5,10),prob=c(pi,1-pi),size=size_,replace=TRUE)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn_mix=sapply(1:N,function(x){gpp_sampler_(n,0.5)})%>%t()
+Xs_bn_sA=sapply(1:N,function(x){gpp_sampler_(n,1)})%>%t()
+Xs_bn_sB=sapply(1:N,function(x){gpp_sampler_(n,0)})%>%t()
+gpp_sampler_=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 0.4,a = 6,b=9)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+#Xs_bn_int=sapply(1:N,function(x){rpois(n = n,lambda =8)})%>%t()
+Xs_bn_int=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
+gpp_sampler_=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 1,a = 1,b=4)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn_oA=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
+Xs_bn_oB=sapply(1:N,function(x){rpois(n = n,lambda =13)})%>%t()
+
+
+#Each row is a sample
+```
+
+## Predictive Recursive
+
+
+```{r}
+
+PR_GPP_int=function(Xs_bn,a,b,nGQ,ntheta){
+
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_t=map(1:N,~pr(.x,p))
+res=sapply(res_t,function(res_t){return(res_t$p)})
+res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+return(res_py)
+###draw f(theta)
+#colnames(res)=paste0("est",1:N)
+#true_f=dtgamma(x_ = theta,shape_ = s,rate_=r,a = a1,b=b1)
+#res_f=res
+#
+#ggdf=res_f%>%as_tibble()%>%
+#  mutate(x=theta,true=true_f)%>%
+#  gather(data = .,key=estimation,value=p,-x)
+#plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_point(colour = #"grey",alpha=0.7)+geom_point(data=ggdf%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+### get the p(x) -- Using Guassian Quadratic
+#
+#Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+#
+#xs=sapply(1:N,function(j){
+#  map_dbl(.x = Xss[,j],.f = function(xs_j){
+#    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = #.x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])
+#  })
+#  
+#})
+#
+#true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+#true=map_dbl(.x = true_xs,
+#             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = #round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = s,rate_ = r,a = a1,b = #b1))[ceiling(xs_gq/((b-a)/ntheta))])
+#             })
+#
+#ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+#plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = #"grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+#return(list(f=plotme_f,p=plotme_p,py=res_py))
+}
+PR_GPP_outA=function(Xs_bn,a,b,nGQ,ntheta){
+
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_t=map(1:N,~pr(.x,p))
+res=sapply(res_t,function(res_t){return(res_t$p)})
+res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+return(res_py)
+###draw f(theta)
+#colnames(res)=paste0("est",1:N)
+#true_f=dtgamma(x_ = theta,shape_ = s,rate_=r,a = a1,b=b1)
+#res_f=res
+#
+#ggdf=res_f%>%as_tibble()%>%
+#  mutate(x=theta,true=true_f)%>%
+#  gather(data = .,key=estimation,value=p,-x)
+#plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_point(colour = #"grey",alpha=0.7)+geom_point(data=ggdf%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+### get the p(x) -- Using Guassian Quadratic
+#
+#Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+#
+#xs=sapply(1:N,function(j){
+#  map_dbl(.x = Xss[,j],.f = function(xs_j){
+#    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = #.x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])
+#  })
+#  
+#})
+#
+#true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+#true=map_dbl(.x = true_xs,
+#             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = #round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = s,rate_ = r,a = a1,b = #b1))[ceiling(xs_gq/((b-a)/ntheta))])
+#             })
+#
+#ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+#plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = #"grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+#return(list(f=plotme_f,p=plotme_p,py=res_py))
+}
+PR_GPP_outB=function(Xs_bn,a,b,nGQ,ntheta){
+
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_t=map(1:N,~pr(.x,p))
+res=sapply(res_t,function(res_t){return(res_t$p)})
+res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+return(res_py)
+###draw f(theta)
+#colnames(res)=paste0("est",1:N)
+#true_f=dtgamma(x_ = theta,shape_ = s,rate_=r,a = a1,b=b1)
+#res_f=res
+#
+#ggdf=res_f%>%as_tibble()%>%
+#  mutate(x=theta,true=true_f)%>%
+#  gather(data = .,key=estimation,value=p,-x)
+#plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_point(colour = #"grey",alpha=0.7)+geom_point(data=ggdf%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+### get the p(x) -- Using Guassian Quadratic
+#
+#Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+#
+#xs=sapply(1:N,function(j){
+#  map_dbl(.x = Xss[,j],.f = function(xs_j){
+#    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = #.x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])
+#  })
+#  
+#})
+#
+#true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+#true=map_dbl(.x = true_xs,
+#             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = #round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = s,rate_ = r,a = a1,b = #b1))[ceiling(xs_gq/((b-a)/ntheta))])
+#             })
+#
+#ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimation=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+#plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = #"grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+#return(list(f=plotme_f,p=plotme_p,py=res_py))
+}
+PR_GPP_mix=function(Xs_bn,theta0,nGQ,ntheta){
+
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+#out=gauss.quad(nGQ)
+#xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=theta0
+
+## Initial Guess:
+
+p=c(0.5,0.5)
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=p[1]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[2]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_t=map(1:N,~pr(.x,p))
+res=sapply(res_t,function(res_t){return(res_t$p)})
+res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+return(res_py)
+
+}
+PR_GPP_sin=function(Xs_bn,theta0,nGQ,ntheta){
+
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+#out=gauss.quad(nGQ)
+#xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=theta0
+
+## Initial Guess:
+p=1
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=p*dpois(x = Xs_bn[i,j],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_t=map(1:N,~pr(.x,p))
+res=sapply(res_t,function(res_t){return(res_t$p)})
+res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+return(res_py)
+##draw f(theta)
+#colnames(res)=paste0("est",1:N)
+#true_f=dtgamma(x_ = theta,shape_ = s,rate_=r,a = a1,b=b1)
+#res_f=res
+#
+#ggdf=res_f%>%as_tibble()%>%
+#  mutate(x=theta,true=true_f)%>%
+#  gather(data = .,key=estimation,value=p,-x)
+#plotme_f=ggplot(data=ggdf,mapping = aes(x=x,y=p,group=estimation))+geom_point(colour = #"grey",alpha=0.7)+geom_point(data=ggdf%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+### get the p(x) -- Using Guassian Quadratic
+#
+#Xss=apply(Xs_bn, 1, function(x){x_range(xs_vec = x,ntheta = ntheta,l = 0,u = Inf)})
+#
+#xs=sapply(1:N,function(j){
+#  map_dbl(.x = Xss[,j],.f = function(xs_j){
+#    (b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x=round(xs_j),lambda = #.x))*res[,j][ceiling(xs_gq/((b-a)/ntheta))])
+#  })
+#  
+#})
+#
+#true_xs=x_range(xs_vec = as.vector(Xs_bn),ntheta = ntheta,l = 0,u = Inf)
+#true=map_dbl(.x = true_xs,
+#             .f =function(xxs_i){ p=(b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = #round(xxs_i),lambda = .x))*(dtgamma(x_ = theta,shape_ = s,rate_ = r,a = a1,b = #b1))[ceiling(xs_gq/((b-a)/ntheta))])
+#             })
+#
+#ggdf_p=data_frame(x=c(as.vector(Xss),true_xs)%>%round(.),p=c(as.vector(xs),true),estimatio#n=c(paste0("est",rep(1:N,each=ntheta)),rep("true",ntheta)))
+#plotme_p=ggplot(data=ggdf_p,mapping = aes(x=x,y=p,group=estimation))+geom_line(colour = #"grey",alpha=0.7)+geom_line(data=ggdf_p%>%filter(estimation=="true"),mapping = #aes(x=x,y=p))
+#
+#
+#return(list(f=plotme_f,p=plotme_p,py=res_py))
+}
+```
+
+```{r}
+nGQ=20
+ntheta=100
+```
+
+
+```{r}
+#First true.Second estimation
+mix_int=PR_GPP_int(Xs_bn_mix,a=5,b=10,nGQ,ntheta)
+mix_outA=PR_GPP_outA(Xs_bn_mix,a=0,b=5,nGQ,ntheta)
+mix_outB=PR_GPP_outB(Xs_bn_mix,a=10,b=20,nGQ,ntheta)
+mix_mix=PR_GPP_mix(Xs_bn_mix,theta0=c(5,10),nGQ,ntheta)
+mix_sinA=PR_GPP_sin(Xs_bn_mix,theta0=5,nGQ,ntheta)
+mix_sinB=PR_GPP_sin(Xs_bn_mix,theta0=10,nGQ,ntheta)
+
+int_int=PR_GPP_int(Xs_bn_int,a=5,b=10,nGQ,ntheta)
+int_outA=PR_GPP_outA(Xs_bn_int,a=0,b=5,nGQ,ntheta)
+int_outB=PR_GPP_outB(Xs_bn_int,a=10,b=20,nGQ,ntheta)
+int_mix=PR_GPP_mix(Xs_bn_int,theta0=c(5,10),nGQ,ntheta)
+int_sinA=PR_GPP_sin(Xs_bn_int,theta0=5,nGQ,ntheta)
+int_sinB=PR_GPP_sin(Xs_bn_int,theta0=10,nGQ,ntheta)
+
+outA_int=PR_GPP_int(Xs_bn_oA,a=5,b=10,nGQ,ntheta)
+outA_outA=PR_GPP_outA(Xs_bn_oA,a=0,b=5,nGQ,ntheta)
+outA_outB=PR_GPP_outB(Xs_bn_oA,a=10,b=20,nGQ,ntheta)
+outA_mix=PR_GPP_mix(Xs_bn_oA,theta0=c(5,10),nGQ,ntheta)
+outA_sinA=PR_GPP_sin(Xs_bn_oA,theta0=5,nGQ,ntheta)
+outA_sinB=PR_GPP_sin(Xs_bn_oA,theta0=10,nGQ,ntheta)
+
+outB_int=PR_GPP_int(Xs_bn_oB,a=5,b=10,nGQ,ntheta)
+outB_outA=PR_GPP_outA(Xs_bn_oB,a=0,b=5,nGQ,ntheta)
+outB_outB=PR_GPP_outB(Xs_bn_oB,a=10,b=20,nGQ,ntheta)
+outB_mix=PR_GPP_mix(Xs_bn_oB,theta0=c(5,10),nGQ,ntheta)
+outB_sinA=PR_GPP_sin(Xs_bn_oB,theta0=5,nGQ,ntheta)
+outB_sinB=PR_GPP_sin(Xs_bn_oB,theta0=10,nGQ,ntheta)
+
+sinA_int=PR_GPP_int(Xs_bn_sA,a=5,b=10,nGQ,ntheta)
+sinA_outA=PR_GPP_outA(Xs_bn_sA,a=0,b=5,nGQ,ntheta)
+sinA_outB=PR_GPP_outB(Xs_bn_sA,a=10,b=20,nGQ,ntheta)
+sinA_mix=PR_GPP_mix(Xs_bn_sA,theta0=c(5,10),nGQ,ntheta)
+sinA_sinA=PR_GPP_sin(Xs_bn_sA,theta0=5,nGQ,ntheta)
+sinA_sinB=PR_GPP_sin(Xs_bn_sA,theta0=10,nGQ,ntheta)
+
+sinB_int=PR_GPP_int(Xs_bn_sB,a=5,b=10,nGQ,ntheta)
+sinB_outA=PR_GPP_outA(Xs_bn_sB,a=0,b=5,nGQ,ntheta)
+sinB_outB=PR_GPP_outB(Xs_bn_sB,a=10,b=20,nGQ,ntheta)
+sinB_mix=PR_GPP_mix(Xs_bn_sB,theta0=c(5,10),nGQ,ntheta)
+sinB_sinA=PR_GPP_sin(Xs_bn_sB,theta0=5,nGQ,ntheta)
+sinB_sinB=PR_GPP_sin(Xs_bn_sB,theta0=10,nGQ,ntheta)
+
+```
+
+```{r}
+BF=mix_mix/mix_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=int_int/int_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm = T))
+
+BF=int_int/int_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=int_int/int_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=int_int/int_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm = T))
+
+BF=int_int/int_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm=T))
+
+
+########################
+
+
+BF=outA_outA/outA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=outB_outB/outB_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=sinA_sinA/sinA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_int 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=sinB_sinB/sinB_mix 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+```
+
+
+## Permutation Version PPR
+
+```{r}
+
+PPR_GPP_int=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta)
+p[1]=0
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_py=exp(map_dbl(res_t,~.x$py))%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_outA=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta) #uniform
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_py=exp(map_dbl(res_t,~.x$py))%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_outB=function(Xs_bn,a,b,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_py=exp(map_dbl(res_t,~.x$py))%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_mix=function(Xs_bn,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+theta=theta0
+
+## Initial Guess:
+
+p=c(0.5,0.5)
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=p[1]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[2]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_py=exp(map_dbl(res_t,~.x$py))%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_sin=function(Xs_bn,a,b,pi,theta0,nGQ,ntheta){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+nP=100
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+
+
+theta=theta0
+
+## Initial Guess:
+p=1
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=p*dpois(x = Xs_bn[i,j],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_py=exp(map_dbl(res_t,~.x$py))%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+
+```
+
