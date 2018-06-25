@@ -1,0 +1,1527 @@
+---
+title: "newton"
+author: "YunranChen"
+date: "5/10/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("statmod")
+library("statmod")
+library(purrr)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tidyr)
+theme_set(theme_bw())
+#install.packages("truncdist")
+library(truncdist)
+library(rbenchmark)
+#rm(list=ls())
+```
+
+## decide the range for x according to rule-of-thumb
+
+```{r}
+x_range=function(xs_vec,ntheta,l,u){
+  n=length(xs_vec)
+  bw_cut=sd(xs_vec)*(4/3/n)^(1/5)*3
+  ub=max(xs_vec)+bw_cut
+  lb=min(xs_vec)-bw_cut
+  xxs=seq(max(lb,l),min(ub,u),length.out = ntheta)
+  return(xxs)
+}
+```
+
+```{r}
+rtgamma=function(size,shape_,rate_,a,b){
+  u=runif(n = size)
+  c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
+  x=qgamma(p = u*c_inv+pgamma(q=a,shape=shape_,rate=rate_),shape=shape_,rate = rate_)
+  return(x)
+}
+dtgamma=function(x_,shape_,rate_,a,b){
+  c_inv=pgamma(q = b,shape = shape_,rate = rate_)-pgamma(q = a,shape = shape_,rate = rate_)
+  x=dgamma(x = x_,shape=shape_,rate = rate_)/c_inv
+  return(x)
+}
+```
+
+# truncated gamma + point mass mixture -- possion
+
+$f(\theta) = \frac{1}{2}\delta_{10}+\frac{1}{2}Gamma_{[0,10]}(2,0.4)$
+
+## Data Preparation
+
+```{r}
+
+## try truncated gamma + point mass mixture -- possion
+N=100 #size for sample
+n=25 #size for each sample
+set.seed(123)
+
+gpp_sampler_1=function(size_,pi){
+  xs_g = sample(c(5,10),prob=c(pi,1-pi),size=size_,replace=TRUE)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn_mix=sapply(1:N,function(x){gpp_sampler_1(n,0.5)})%>%t()
+Xs_bn_sA=sapply(1:N,function(x){gpp_sampler_1(n,1)})%>%t()
+Xs_bn_sB=sapply(1:N,function(x){gpp_sampler_1(n,0)})%>%t()
+gpp_sampler_2=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 0.4,a = 6,b=9)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+#Xs_bn_int=sapply(1:N,function(x){rpois(n = n,lambda =8)})%>%t()
+Xs_bn_int=sapply(1:N,function(x){gpp_sampler_2(n)})%>%t()
+gpp_sampler_3=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 1,a = 1,b=4)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn_oA=sapply(1:N,function(x){gpp_sampler_3(n)})%>%t()
+Xs_bn_oB=sapply(1:N,function(x){rpois(n = n,lambda =13)})%>%t()
+
+#Each row is a sample
+n_A=ceiling(1.5*n)
+n_B=ceiling(1.2*n)
+xs_A=rpois(n=n_A,lambda=5)
+xs_B=rpois(n=n_B,lambda=10)
+
+```
+
+## Predictive Recursive
+
+
+```{r}
+
+PR_GPP_int_2GQ=function(Xs_bn,aa,bb,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq=out$nodes*(bb-aa)/2+(aa+bb)/2 #change interval
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      a=min(mu_gq[mu_a],mu_gq[mu_b])
+      b=max(mu_gq[mu_a],mu_gq[mu_b])+(0.1*(a==max(mu_gq[mu_a],mu_gq[mu_b])))
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_outA_2GQ=function(Xs_bn,aa,bb,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq=out$nodes*(bb-aa)/2+(aa+bb)/2 #change interval
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      b=min(mu_gq[mu_a],mu_gq[mu_b])
+      a=mu_gq[1]-(0.1*(b==mu_gq[1]))
+      xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+      theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_outB_2GQ=function(Xs_bn,aa,bb,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq=out$nodes*(bb-aa)/2+(aa+bb)/2 #change interval
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      a=max(mu_gq[mu_a],mu_gq[mu_b])
+      b=mu_gq[nGQ]+(0.1*(a==mu_gq[nGQ]))
+  
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_mix_2GQ=function(Xs_bn,aa,bb,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq=out$nodes*(bb-aa)/2+(aa+bb)/2 #change interval
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      a=min(mu_gq[mu_a],mu_gq[mu_b])
+      b=max(mu_gq[mu_a],mu_gq[mu_b])
+      theta0=c(a,b)
+      theta=theta0
+
+## Initial Guess:
+
+p=c(0.5,0.5)
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=p[1]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[2]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_sin_2GQ=function(Xs_bn,aa,bb,nGQ,ntheta,r_a,s_a,xs_a){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq=out$nodes*(bb-aa)/2+(aa+bb)/2 #change interval
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_A,rate = s_A))
+Weights=out$weights
+point=function(n_i){
+res_ij=vector(length = nGQ)
+  for (mu_a in 1:nGQ){
+      theta0=mu_gq[mu_a]
+      theta=theta0
+## Initial Guess:
+p=1
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=p*dpois(x = Xs_bn[i,j],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  #return(list(p=p,py=py))
+  return(py)
+}
+res_ij[mu_a]=pr(n_i,p)
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+  }
+res_py=sum(Weights*exp(res_ij)*p_a)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+
+```
+
+```{r}
+nGQ=20
+ntheta=100
+r_a=0.5
+s_a=0.1
+r_b=1
+s_b=0.1
+xs_a=xs_A
+xs_b=xs_B
+aa=1
+bb=20
+```
+
+```{r}
+#First true.Second estimation
+past=proc.time()
+mix_int = PR_GPP_int_2GQ(Xs_bn_mix,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+mix_outA=PR_GPP_outA_2GQ(Xs_bn_mix,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+mix_outB=PR_GPP_outB_2GQ(Xs_bn_mix,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+mix_mix = PR_GPP_mix_2GQ(Xs_bn_mix,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+mix_sinA= PR_GPP_sin_2GQ(Xs_bn_mix,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a)
+mix_sinB= PR_GPP_sin_2GQ(Xs_bn_mix,aa=1,bb=20,nGQ,ntheta,r_b,s_b,xs_b)
+now=proc.time()
+int_int = PR_GPP_int_2GQ(Xs_bn_int,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+int_outA=PR_GPP_outA_2GQ(Xs_bn_int,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+int_outB=PR_GPP_outB_2GQ(Xs_bn_int,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+int_mix = PR_GPP_mix_2GQ(Xs_bn_int,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+int_sinA= PR_GPP_sin_2GQ(Xs_bn_int,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a)
+int_sinB= PR_GPP_sin_2GQ(Xs_bn_int,aa=1,bb=20,nGQ,ntheta,r_b,s_b,xs_b)
+
+outA_int = PR_GPP_int_2GQ(Xs_bn_oA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outA_outA=PR_GPP_outA_2GQ(Xs_bn_oA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outA_outB=PR_GPP_outB_2GQ(Xs_bn_oA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outA_mix = PR_GPP_mix_2GQ(Xs_bn_oA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outA_sinA= PR_GPP_sin_2GQ(Xs_bn_oA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a)
+outA_sinB= PR_GPP_sin_2GQ(Xs_bn_oA,aa=1,bb=20,nGQ,ntheta,r_b,s_b,xs_b)
+
+outB_int = PR_GPP_int_2GQ(Xs_bn_oB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outB_outA=PR_GPP_outA_2GQ(Xs_bn_oB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outB_outB=PR_GPP_outB_2GQ(Xs_bn_oB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outB_mix = PR_GPP_mix_2GQ(Xs_bn_oB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+outB_sinA= PR_GPP_sin_2GQ(Xs_bn_oB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a)
+outB_sinB= PR_GPP_sin_2GQ(Xs_bn_oB,aa=1,bb=20,nGQ,ntheta,r_b,s_b,xs_b)
+
+sinA_int = PR_GPP_int_2GQ(Xs_bn_sA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinA_outA=PR_GPP_outA_2GQ(Xs_bn_sA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinA_outB=PR_GPP_outB_2GQ(Xs_bn_sA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinA_mix = PR_GPP_mix_2GQ(Xs_bn_sA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinA_sinA= PR_GPP_sin_2GQ(Xs_bn_sA,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a)
+sinA_sinB= PR_GPP_sin_2GQ(Xs_bn_sA,aa=1,bb=20,nGQ,ntheta,r_b,s_b,xs_b)
+
+sinB_int = PR_GPP_int_2GQ(Xs_bn_sB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinB_outA=PR_GPP_outA_2GQ(Xs_bn_sB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinB_outB=PR_GPP_outB_2GQ(Xs_bn_sB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinB_mix = PR_GPP_mix_2GQ(Xs_bn_sB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+sinB_sinA= PR_GPP_sin_2GQ(Xs_bn_sB,aa=1,bb=20,nGQ,ntheta,r_a,s_a,xs_a)
+sinB_sinB= PR_GPP_sin_2GQ(Xs_bn_sB,aa=1,bb=20,nGQ,ntheta,r_b,s_b,xs_b)
+
+tictoc=now-past
+```
+
+```{r}
+BF=mix_mix/mix_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=int_int/int_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm = T))
+
+BF=int_int/int_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=int_int/int_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=int_int/int_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm = T))
+
+BF=int_int/int_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm=T))
+
+
+########################
+
+
+BF=outA_outA/outA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=outB_outB/outB_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=sinA_sinA/sinA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_int 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=sinB_sinB/sinB_mix 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+```
+
+## Generalized version
+
+```{r}
+PR_GPP_int_2GQg=function(Xs_bn,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq1=out$nodes*(bb1-aa1)/2+(aa1+bb1)/2 #change interval
+mu_gq2=out$nodes*(bb2-aa2)/2+(aa2+bb2)/2
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq1[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq2[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      a=min(mu_gq1[mu_a],mu_gq2[mu_b])
+      b=max(mu_gq1[mu_a],mu_gq2[mu_b])+(0.1*(a==max(mu_gq1[mu_a],mu_gq2[mu_b])))
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+###
+PR_GPP_outA_2GQg=function(Xs_bn,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq1=out$nodes*(bb1-aa1)/2+(aa1+bb1)/2 #change interval
+mu_gq2=out$nodes*(bb2-aa2)/2+(aa2+bb2)/2
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq1[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq2[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      b=min(mu_gq1[mu_a],mu_gq2[mu_b])
+      a=mu_gq1[1]-(0.1*(b==mu_gq1[1]))
+      xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+      theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_outB_2GQg=function(Xs_bn,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq1=out$nodes*(bb1-aa1)/2+(aa1+bb1)/2 #change interval
+mu_gq2=out$nodes*(bb2-aa2)/2+(aa2+bb2)/2
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq1[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq2[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      a=max(mu_gq1[mu_a],mu_gq2[mu_b])
+      b=mu_gq2[nGQ]+(0.1*(a==mu_gq2[nGQ]))
+  
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess:
+
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_mix_2GQg=function(Xs_bn,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  r_B=sum(xs_b)+r_b
+  s_B=length(xs_b)+s_b
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq1=out$nodes*(bb1-aa1)/2+(aa1+bb1)/2 #change interval
+mu_gq2=out$nodes*(bb2-aa2)/2+(aa2+bb2)/2
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq1[.x],shape = r_A,rate = s_A))
+p_b=map_dbl(1:nGQ,~dgamma(x = mu_gq2[.x],shape = r_B,rate = s_B))
+P_ab=p_a %o% p_b
+Weights=out$weights %o% out$weights
+point=function(n_i){
+res_ij=matrix(nrow = nGQ,ncol = nGQ)
+  for (mu_a in 1:nGQ){
+    for (mu_b in 1:nGQ){
+      a=min(mu_gq1[mu_a],mu_gq2[mu_b])
+      b=max(mu_gq1[mu_a],mu_gq2[mu_b])
+      theta0=c(a,b)
+      theta=theta0
+
+## Initial Guess:
+
+p=c(0.5,0.5)
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=p[1]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[2]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  return(list(p=p,py=py))
+}
+res_ij[mu_a,mu_b]=pr(n_i,p)$py
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+    }
+  }
+res_py=sum(Weights*exp(res_ij)*P_ab)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+PR_GPP_sin_2GQg=function(Xs_bn,aa,bb,nGQ,ntheta,r_a,s_a,xs_a){
+
+  r_A=sum(xs_a)+r_a
+  s_A=length(xs_a)+s_a
+  
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+#guass.quad
+out=gauss.quad(nGQ)
+mu_gq=out$nodes*(bb-aa)/2+(aa+bb)/2 #change interval
+p_a=map_dbl(1:nGQ,~dgamma(x = mu_gq[.x],shape = r_A,rate = s_A))
+Weights=out$weights
+point=function(n_i){
+res_ij=vector(length = nGQ)
+  for (mu_a in 1:nGQ){
+      theta0=mu_gq[mu_a]
+      theta=theta0
+## Initial Guess:
+p=1
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+pr=function(i,p_0){
+  p=p_0
+  py=0
+for (j in 1:n){
+  p_x=map_dbl(theta,~dpois(x = Xs_bn[i,j],lambda = .x))
+  int=p*dpois(x = Xs_bn[i,j],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+}
+  #return(list(p=p,py=py))
+  return(py)
+}
+res_ij[mu_a]=pr(n_i,p)
+#res_t=map(1:N,~pr(.x,p))
+#res=sapply(res_t,function(res_t){return(res_t$p)})
+#res_py=map_dbl(res_t,~.x$py)%>%exp(.)
+  }
+res_py=sum(Weights*exp(res_ij)*p_a)
+return(res_py)
+}
+res_py=map_dbl(1:N,~point(.x))
+return(res_py)
+}
+
+```
+
+```{r}
+nGQ=20
+ntheta=100
+r_a=0.5
+s_a=0.1
+r_b=1
+s_b=0.1
+xs_a=xs_A
+xs_b=xs_B
+aa1=1
+bb1=7
+aa2=8
+bb2=20
+```
+
+```{r}
+#First true.Second estimation
+past=proc.time()
+gmix_int = PR_GPP_int_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gmix_outA=PR_GPP_outA_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gmix_outB=PR_GPP_outB_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gmix_mix = PR_GPP_mix_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gmix_sinA= PR_GPP_sin_2GQg(Xs_bn_mix,aa1,bb1,nGQ,ntheta,r_a,s_a,xs_a)
+gmix_sinB= PR_GPP_sin_2GQg(Xs_bn_mix,aa2,bb2,nGQ,ntheta,r_b,s_b,xs_b)
+now=proc.time()
+gint_int = PR_GPP_int_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gint_outA=PR_GPP_outA_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gint_outB=PR_GPP_outB_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gint_mix = PR_GPP_mix_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gint_sinA= PR_GPP_sin_2GQg(Xs_bn_mix,aa1,bb1,nGQ,ntheta,r_a,s_a,xs_a)
+gint_sinB= PR_GPP_sin_2GQg(Xs_bn_mix,aa2,bb2,nGQ,ntheta,r_b,s_b,xs_b)
+
+goutA_int = PR_GPP_int_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutA_outA=PR_GPP_outA_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutA_outB=PR_GPP_outB_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutA_mix = PR_GPP_mix_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutA_sinA= PR_GPP_sin_2GQg(Xs_bn_mix,aa1,bb1,nGQ,ntheta,r_a,s_a,xs_a)
+goutA_sinB= PR_GPP_sin_2GQg(Xs_bn_mix,aa2,bb2,nGQ,ntheta,r_b,s_b,xs_b)
+
+goutB_int = PR_GPP_int_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutB_outA=PR_GPP_outA_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutB_outB=PR_GPP_outB_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutB_mix = PR_GPP_mix_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+goutB_sinA= PR_GPP_sin_2GQg(Xs_bn_mix,aa1,bb1,nGQ,ntheta,r_a,s_a,xs_a)
+goutB_sinB= PR_GPP_sin_2GQg(Xs_bn_mix,aa2,bb2,nGQ,ntheta,r_b,s_b,xs_b)
+
+gsinA_int = PR_GPP_int_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinA_outA=PR_GPP_outA_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinA_outB=PR_GPP_outB_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinA_mix = PR_GPP_mix_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinA_sinA= PR_GPP_sin_2GQg(Xs_bn_mix,aa1,bb1,nGQ,ntheta,r_a,s_a,xs_a)
+gsinA_sinB= PR_GPP_sin_2GQg(Xs_bn_mix,aa2,bb2,nGQ,ntheta,r_b,s_b,xs_b)
+
+gsinB_int = PR_GPP_int_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinB_outA=PR_GPP_outA_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinB_outB=PR_GPP_outB_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinB_mix = PR_GPP_mix_2GQg(Xs_bn_mix,aa1,bb1,aa2,bb2,nGQ,ntheta,r_a,s_a,xs_a,r_b,s_b,xs_b)
+gsinB_sinA= PR_GPP_sin_2GQg(Xs_bn_mix,aa1,bb1,nGQ,ntheta,r_a,s_a,xs_a)
+gsinB_sinB= PR_GPP_sin_2GQg(Xs_bn_mix,aa2,bb2,nGQ,ntheta,r_b,s_b,xs_b)
+
+tictoc=now-past
+```
+
+```{r}
+gBF=gmix_mix/gmix_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gmix_mix/gmix_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gmix_mix/gmix_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gmix_mix/gmix_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gmix_mix/gmix_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+########################
+
+
+gBF=gint_int/gint_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x,na.rm = T))
+
+gBF=gint_int/gint_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gint_int/gint_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gint_int/gint_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x,na.rm = T))
+
+gBF=gint_int/gint_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x,na.rm=T))
+
+
+########################problem
+
+
+gBF=goutA_outA/goutA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutA_outA/goutA_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutA_outA/goutA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutA_outA/goutA_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutA_outA/goutA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+########################problem
+
+
+gBF=goutB_outB/goutB_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutB_outB/goutB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutB_outB/goutB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutB_outB/goutB_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=goutB_outB/goutB_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+########################problem
+
+
+gBF=gsinA_sinA/gsinA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinA_sinA/gsinA_int 
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinA_sinA/gsinA_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinA_sinA/gsinA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinA_sinA/gsinA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+########################
+
+
+gBF=gsinB_sinB/gsinB_mix 
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinB_sinB/gsinB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinB_sinB/gsinB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinB_sinB/gsinB_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+gBF=gsinB_sinB/gsinB_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(gBF>.x))
+
+```
+
+## Permutation Version PPR
+
+```{r}
+PPR_GPP_int=function(Xs_bn,a,b,nGQ,ntheta,nP){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta)
+p[1]=0
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_ppy=exp(map_dbl(res_t,~.x$py))
+res_py=res_ppy[is.finite(res_ppy)]%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+
+return(res_py)
+
+}
+PPR_GPP_outA=function(Xs_bn,a,b,nGQ,ntheta,nP){
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+
+
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta) #uniform
+p[ntheta]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_ppy=exp(map_dbl(res_t,~.x$py))
+res_py=res_ppy[is.finite(res_ppy)]%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_outB=function(Xs_bn,a,b,nGQ,ntheta,nP){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+#guass.quad
+out=gauss.quad(nGQ)
+xs_gq=out$nodes*(b-a)/2+(a+b)/2 #change interval
+theta=seq(a,b,length.out = ntheta)
+
+## Initial Guess: Uniform on [0,10]
+p=rep(1/(b-a),ntheta) #uniform
+p[1]=0
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=((b-a)/2*sum(out$weights*map_dbl(xs_gq,~dpois(x = Xs_bn[i,j],lambda = .x))*p[ceiling((xs_gq-a)/((b-a)/ntheta))]))
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_ppy=exp(map_dbl(res_t,~.x$py))
+res_py=res_ppy[is.finite(res_ppy)]%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_mix=function(Xs_bn,theta0,nGQ,ntheta,nP){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+theta=theta0
+
+## Initial Guess:
+
+p=c(0.5,0.5)
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=p[1]*dpois(x = Xs_bn[i,j],lambda = theta0[1])+p[2]*dpois(x = Xs_bn[i,j],lambda = theta0[2])
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%apply(., 1,mean)
+res_ppy=exp(map_dbl(res_t,~.x$py))
+res_py=res_ppy[is.finite(res_ppy)]%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+PPR_GPP_sin=function(Xs_bn,theta0,nGQ,ntheta,nP){
+
+#permutation
+N=nrow(Xs_bn)
+n=ncol(Xs_bn)
+set.seed(123)
+ind=sapply(1:nP,function(x){sample.int(n = n,size = n,replace = FALSE)})
+theta=theta0
+
+## Initial Guess:
+p=1
+
+## weight seq
+w=1/(1:n+1)
+
+##Recursion
+ppr=function(i,p_0,Xs_bn){
+  p=p_0
+  xs_bn=Xs_bn[i,]
+  Xs_bn_p=sapply(1:nP,function(i){xs_bn[ind[,i]]})
+res_t=map(1:nP,function(ix){
+  py=0
+    for (j in 1:n){
+      p_x=map_dbl(theta,~dpois(x = Xs_bn_p[j,ix],lambda = .x))
+      int=p*dpois(x = Xs_bn[i,j],lambda = theta0)
+  p=(1-w[j])*p+w[j]*p_x*p/int
+  py=log(int)+py
+    }
+    return(list(p=p,py=py))})
+
+pp=sapply(res_t,function(res_t){return(res_t$p)})%>%mean(.)
+res_ppy=exp(map_dbl(res_t,~.x$py))
+res_py=res_ppy[is.finite(res_ppy)]%>%mean(.)
+return(list(pp=pp,py=res_py))
+}
+
+res_t=map(1:N,function(i){return(ppr(i,p,Xs_bn))})
+res=sapply(res_t,function(res_t){return(res_t$pp)})
+res_py=map_dbl(res_t,~.x$py)
+
+return(res_py)
+
+}
+
+```
+
+## Data Preparation
+
+```{r}
+
+## try truncated gamma + point mass mixture -- possion
+N=100 #size for sample
+n=200 #size for each sample
+set.seed(123)
+
+gpp_sampler_=function(size_,pi){
+  xs_g = sample(c(5,10),prob=c(pi,1-pi),size=size_,replace=TRUE)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn_mix=sapply(1:N,function(x){gpp_sampler_(n,0.5)})%>%t()
+Xs_bn_sA=sapply(1:N,function(x){gpp_sampler_(n,1)})%>%t()
+Xs_bn_sB=sapply(1:N,function(x){gpp_sampler_(n,0)})%>%t()
+gpp_sampler_=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 0.25,a = 6,b=9)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+#Xs_bn_int=sapply(1:N,function(x){rpois(n = n,lambda =8)})%>%t()
+Xs_bn_int=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
+gpp_sampler_=function(size_){
+  xs_g=rtgamma(size =  size_,shape_ = 2,rate_ = 1,a = 1,b=4)
+  xs_gp=map_dbl(xs_g,~rpois(n = 1,lambda = .x))
+return(xs_gp)
+}
+Xs_bn_oA=sapply(1:N,function(x){gpp_sampler_(n)})%>%t()
+Xs_bn_oB=sapply(1:N,function(x){rpois(n = n,lambda =13)})%>%t()
+
+
+#Each row is a sample
+```
+
+
+```{r}
+nGQ=20
+ntheta=100
+nP=100
+```
+
+
+
+```{r}
+#First true.Second estimation
+mix_int=PPR_GPP_int(Xs_bn_mix,a=5,b=10,nGQ,ntheta,nP)
+mix_outA=PPR_GPP_outA(Xs_bn_mix,a=0,b=5,nGQ,ntheta,nP)
+mix_outB=PPR_GPP_outB(Xs_bn_mix,a=10,b=20,nGQ,ntheta,nP)
+mix_mix=PPR_GPP_mix(Xs_bn_mix,theta0=c(5,10),nGQ,ntheta,nP)
+mix_sinA=PPR_GPP_sin(Xs_bn_mix,theta0=5,nGQ,ntheta,nP)
+mix_sinB=PPR_GPP_sin(Xs_bn_mix,theta0=10,nGQ,ntheta,nP)
+
+int_int=PPR_GPP_int(Xs_bn_int,a=5,b=10,nGQ,ntheta,nP)
+int_outA=PPR_GPP_outA(Xs_bn_int,a=0,b=5,nGQ,ntheta,nP)
+int_outB=PPR_GPP_outB(Xs_bn_int,a=10,b=20,nGQ,ntheta,nP)
+int_mix=PPR_GPP_mix(Xs_bn_int,theta0=c(5,10),nGQ,ntheta,nP)
+int_sinA=PPR_GPP_sin(Xs_bn_int,theta0=5,nGQ,ntheta,nP)
+int_sinB=PPR_GPP_sin(Xs_bn_int,theta0=10,nGQ,ntheta,nP)
+
+outA_int=PPR_GPP_int(Xs_bn_oA,a=5,b=10,nGQ,ntheta,nP)
+outA_outA=PPR_GPP_outA(Xs_bn_oA,a=0,b=5,nGQ,ntheta,nP)
+outA_outB=PPR_GPP_outB(Xs_bn_oA,a=10,b=20,nGQ,ntheta,nP)
+outA_mix=PPR_GPP_mix(Xs_bn_oA,theta0=c(5,10),nGQ,ntheta,nP)
+outA_sinA=PPR_GPP_sin(Xs_bn_oA,theta0=5,nGQ,ntheta,nP)
+outA_sinB=PPR_GPP_sin(Xs_bn_oA,theta0=10,nGQ,ntheta,nP)
+
+outB_int=PPR_GPP_int(Xs_bn_oB,a=5,b=10,nGQ,ntheta,nP)
+outB_outA=PPR_GPP_outA(Xs_bn_oB,a=0,b=5,nGQ,ntheta,nP)
+outB_outB=PPR_GPP_outB(Xs_bn_oB,a=10,b=20,nGQ,ntheta,nP)
+outB_mix=PPR_GPP_mix(Xs_bn_oB,theta0=c(5,10),nGQ,ntheta,nP)
+outB_sinA=PPR_GPP_sin(Xs_bn_oB,theta0=5,nGQ,ntheta,nP)
+outB_sinB=PPR_GPP_sin(Xs_bn_oB,theta0=10,nGQ,ntheta,nP)
+
+sinA_int=PPR_GPP_int(Xs_bn_sA,a=5,b=10,nGQ,ntheta,nP)
+sinA_outA=PPR_GPP_outA(Xs_bn_sA,a=0,b=5,nGQ,ntheta,nP)
+sinA_outB=PPR_GPP_outB(Xs_bn_sA,a=10,b=20,nGQ,ntheta,nP)
+sinA_mix=PPR_GPP_mix(Xs_bn_sA,theta0=c(5,10),nGQ,ntheta,nP)
+sinA_sinA=PPR_GPP_sin(Xs_bn_sA,theta0=5,nGQ,ntheta,nP)
+sinA_sinB=PPR_GPP_sin(Xs_bn_sA,theta0=10,nGQ,ntheta,nP)
+
+sinB_int=PPR_GPP_int(Xs_bn_sB,a=5,b=10,nGQ,ntheta,nP)
+sinB_outA=PPR_GPP_outA(Xs_bn_sB,a=0,b=5,nGQ,ntheta,nP)
+sinB_outB=PPR_GPP_outB(Xs_bn_sB,a=10,b=20,nGQ,ntheta,nP)
+sinB_mix=PPR_GPP_mix(Xs_bn_sB,theta0=c(5,10),nGQ,ntheta,nP)
+sinB_sinA=PPR_GPP_sin(Xs_bn_sB,theta0=5,nGQ,ntheta,nP)
+sinB_sinB=PPR_GPP_sin(Xs_bn_sB,theta0=10,nGQ,ntheta,nP)
+
+```
+
+```{r}
+BF=mix_mix/mix_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=mix_mix/mix_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=int_int/int_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm = T))
+
+BF=int_int/int_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=int_int/int_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=int_int/int_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm = T))
+
+BF=int_int/int_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x,na.rm=T))
+
+
+########################
+
+
+BF=outA_outA/outA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outA_outA/outA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=outB_outB/outB_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_sinA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=outB_outB/outB_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=sinA_sinA/sinA_mix
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_int 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_outA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinA_sinA/sinA_sinB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+########################
+
+
+BF=sinB_sinB/sinB_mix 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_int
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_outA
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_outB
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+BF=sinB_sinB/sinB_sinA 
+k=c(1,3,20,150)
+map_dbl(k,~mean(BF>.x))
+
+```
